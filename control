@@ -1,0 +1,9 @@
+Package: com.bogiadat.githubkey
+Name: GitHubKey
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Online GitHub Raw key validation tweak
+Maintainer: Admin
+Author: Admin
+Section: Tweaks
+Depends: mobilesubstrate
