@@ -4,7 +4,7 @@
 static NSString * const kKeyURL =
     @"https://raw.githubusercontent.com/bogiadatindo-dot/key/refs/heads/main/key";
 
-static NSString * const kSavedKeyDefaultKey = @"GitHubKey_IsAuthenticated";
+static NSString * const kSavedKeyDefaultKey = @"ServerKey_IsAuthenticated";
 
 static BOOL gPromptVisible = NO;
 static BOOL gRequestInProgress = NO;
@@ -53,7 +53,7 @@ static void GKValidateKey(NSString *enteredKey,
         if (error || !data || ![(NSHTTPURLResponse *)response statusCode] ||
             [(NSHTTPURLResponse *)response statusCode] != 200) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                completion(NO, @"Không thể kết nối Sever. Hãy thử lại.");
+                completion(NO, @"Không thể kết nối Server. Hãy thử lại.");
             });
             return;
         }
@@ -62,7 +62,7 @@ static void GKValidateKey(NSString *enteredKey,
                                                encoding:NSUTF8StringEncoding];
         if (!body) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                completion(NO, @"Dữ liệu KEY trên Sever không hợp lệ.");
+                completion(NO, @"Dữ liệu KEY trên Server không hợp lệ.");
             });
             return;
         }
@@ -89,7 +89,7 @@ static void GKValidateKey(NSString *enteredKey,
 }
 
 static void GKShowKeyPrompt(void) {
-    // Kiểm tra nếu đã xác thực thành công trước đó thì bỏ qua không hiện popup nữa
+    // Kiểm tra nếu đã xác thực thành công trước đó thì bỏ qua
     if ([[NSUserDefaults standardUserDefaults] boolForKey:kSavedKeyDefaultKey]) {
         return;
     }
@@ -123,7 +123,6 @@ static void GKShowKeyPrompt(void) {
         GKValidateKey(key, ^(BOOL valid, NSString *message) {
             gRequestInProgress = NO;
 
-            // Nếu đúng thì lưu trạng thái lại để lần sau không bị hỏi nữa
             if (valid) {
                 [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kSavedKeyDefaultKey];
                 [[NSUserDefaults standardUserDefaults] synchronize];
@@ -131,7 +130,7 @@ static void GKShowKeyPrompt(void) {
 
             UIViewController *presenter = GKTopViewController();
             UIAlertController *result =
-              [UIAlertController alertControllerWithTitle:(valid ? @"KEY HỢP LỆ LIÊN HỆ TEDDY LẤY KEY" : @"THÔNG BÁO")
+              [UIAlertController alertControllerWithTitle:(valid ? @"KEY HỢP LỆ IB TEDDY LẤY KEY" : @"THÔNG BÁO")
                                                   message:message
                                            preferredStyle:UIAlertControllerStyleAlert];
             [result addAction:[UIAlertAction actionWithTitle:@"OK"
@@ -148,19 +147,12 @@ static void GKShowKeyPrompt(void) {
         });
     }]];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"ĐÓNG"
-                                              style:UIAlertActionStyleCancel
-                                            handler:^(__unused UIAlertAction *action) {
-        gPromptVisible = NO;
-    }]];
-
     [root presentViewController:alert animated:YES completion:nil];
 }
 
 %ctor {
     @autoreleasepool {
         dispatch_async(dispatch_get_main_queue(), ^{
-            // Nếu đã lưu key hợp lệ từ trước thì không lắng nghe sự kiện hiện prompt nữa
             if ([[NSUserDefaults standardUserDefaults] boolForKey:kSavedKeyDefaultKey]) {
                 return;
             }
