@@ -1,4 +1,3 @@
-
 name: Build Theos Tweak
 
 on:
@@ -19,6 +18,10 @@ jobs:
           git clone --recursive https://github.com/theos/theos.git $HOME/theos
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "$HOME/theos/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies (ldid)
+        run: |
+          brew install ldid
 
       - name: Build package
         run: |
