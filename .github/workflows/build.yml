@@ -1,34 +1,26 @@
-name: Build Theos Tweak
+name: Build iOS Dylib
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
+    branches: [ main, master ]
+  workflow_dispatch: # Cho phép bấm nút chạy thủ công bất cứ lúc nào
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-latest # Sử dụng máy ảo macOS có sẵn Xcode và iOS SDK
 
     steps:
-      - name: Checkout
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Install Theos
+      - name: Compile KeyAuth.dylib
         run: |
-          git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "$HOME/theos/bin" >> $GITHUB_PATH
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -dynamiclib -arch arm64 -fobjc-arc -isysroot "$SDK_PATH" -framework Foundation -framework UIKit KeyAuth.m -o KeyAuth.dylib
+          ldid -S KeyAuth.dylib || codesign -s - KeyAuth.dylib || true
 
-      - name: Install dependencies (ldid)
-        run: |
-          brew install ldid
-
-      - name: Build package
-        run: |
-          make package THEOS_PACKAGE_SCHEME=rootless
-
-      - name: Upload deb
+      - name: Upload Dylib Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GitHubKey-deb
-          path: packages/*.deb
+          name: KeyAuth-dylib
+          path: KeyAuth.dylib
