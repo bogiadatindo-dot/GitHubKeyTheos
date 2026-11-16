@@ -1,180 +1,293 @@
 #import <UIKit/UIKit.h>
-#import <Foundation/Foundation.h>
 
-static NSString * const kKeyURL =
-    @"https://raw.githubusercontent.com/bogiadatindo-dot/key/refs/heads/main/key";
+// Sử dụng GitHub API trỏ thẳng tới file "key" trong repo bogiadatindo-dot/key để đồng bộ 0 giây (không bị cache 5 phút)
+#define GITHUB_API_URL @"https://api.github.com/repos/bogiadatindo-dot/key/contents/key"
 
-static NSString * const kSavedKeyDefaultKey = @"ServerKey_IsAuthenticated";
+#define SAVED_KEY_PREF @"SavedUserLicenseKey"
+#define FIRST_LOGIN_ALERT @"HasShownWelcomeAlert"
+#define IS_VERIFIED_BEFORE @"HasVerifiedKeyBefore"
 
-static BOOL gPromptVisible = NO;
-static BOOL gRequestInProgress = NO;
+static NSTimer *expiryTimer = nil;
 
-static UIViewController *GKTopViewController(void) {
-    UIApplication *app = UIApplication.sharedApplication;
-    for (UIScene *scene in app.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        for (UIWindow *window in windowScene.windows) {
-            if (window.isKeyWindow && window.rootViewController) {
-                UIViewController *vc = window.rootViewController;
-                while (vc.presentedViewController) {
-                    vc = vc.presentedViewController;
-                }
-                return vc;
-            }
+@interface KeyManager : NSObject
++ (void)checkLicense;
++ (void)scheduleAutoKickAtDate:(NSDate *)expiryDate currentServerDate:(NSDate *)serverDate expiryString:(NSString *)expiryStr;
++ (void)forceLogoutAndExitWithReason:(NSString *)reason;
++ (void)showKeyPromptWithMessage:(NSString *)message prefillKey:(NSString *)prefill;
++ (void)showInfoAlertWithTitle:(NSString *)title message:(NSString *)message;
+@end
+
+@implementation KeyManager
+
++ (UIWindow *)getActiveWindow {
+    UIWindow *foundWindow = nil;
+    NSArray *windows = [[UIApplication sharedApplication] windows];
+    for (UIWindow *window in windows) {
+        if (window.isKeyWindow) {
+            foundWindow = window;
+            break;
         }
     }
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    UIWindow *window = app.keyWindow;
-#pragma clang diagnostic pop
-    UIViewController *vc = window.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    return vc;
+    return foundWindow ?: windows.firstObject;
 }
 
-static void GKValidateKey(NSString *enteredKey,
-                          void (^completion)(BOOL, NSString *)) {
-    NSString *trimmed = [enteredKey stringByTrimmingCharactersInSet:
-                         NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trimmed.length == 0) {
-        completion(NO, @"Vui lòng nhập KEY.");
++ (NSDate *)getServerDateFromResponse:(NSURLResponse *)response {
+    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        NSString *dateString = httpResponse.allHeaderFields[@"Date"];
+        if (dateString) {
+            NSDateFormatter *rfcFormatter = [[NSDateFormatter alloc] init];
+            rfcFormatter.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+            rfcFormatter.dateFormat = @"EEE, dd MMM yyyy HH:mm:ss z";
+            NSDate *serverDate = [rfcFormatter dateFromString:dateString];
+            if (serverDate) return serverDate;
+        }
+    }
+    return [NSDate date];
+}
+
+// Hẹn giờ tự động đá văng app ngay tại giây phút key hết hạn
++ (void)scheduleAutoKickAtDate:(NSDate *)expiryDate currentServerDate:(NSDate *)serverDate expiryString:(NSString *)expiryStr {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (expiryTimer) {
+            [expiryTimer invalidate];
+            expiryTimer = nil;
+        }
+        
+        NSTimeInterval remainingSeconds = [expiryDate timeIntervalSinceDate:serverDate];
+        
+        if (remainingSeconds <= 0) {
+            NSString *msg = [NSString stringWithFormat:@"Key đã hết hạn lúc %@. Ứng dụng sẽ thoát để nhập lại Key!", expiryStr];
+            [self forceLogoutAndExitWithReason:msg];
+            return;
+        }
+        
+        expiryTimer = [NSTimer scheduledTimerWithTimeInterval:remainingSeconds repeats:NO block:^(NSTimer * _Nonnull timer) {
+            NSString *msg = [NSString stringWithFormat:@"Key của bạn vừa hết hạn (%@). Ứng dụng sẽ tự động thoát!", expiryStr];
+            [self forceLogoutAndExitWithReason:msg];
+        }];
+    });
+}
+
+// Xóa key cũ, hiện cảnh báo và buộc thoát app
++ (void)forceLogoutAndExitWithReason:(NSString *)reason {
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:SAVED_KEY_PREF];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:FIRST_LOGIN_ALERT];
+    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:IS_VERIFIED_BEFORE];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = [self getActiveWindow];
+        UIViewController *rootVC = window.rootViewController;
+        while (rootVC.presentedViewController) {
+            rootVC = rootVC.presentedViewController;
+        }
+        
+        if (rootVC) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Hết Thời Gian Sử Dụng"
+                                                                           message:reason
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            
+            UIAlertAction *exitAction = [UIAlertAction actionWithTitle:@"Thoát App Ngay" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+                exit(0);
+            }];
+            
+            [alert addAction:exitAction];
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        }
+        
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            exit(0);
+        });
+    });
+}
+
++ (void)checkLicense {
+    NSString *savedKey = [[NSUserDefaults standardUserDefaults] stringForKey:SAVED_KEY_PREF];
+    BOOL wasVerifiedBefore = [[NSUserDefaults standardUserDefaults] boolForKey:IS_VERIFIED_BEFORE];
+    
+    if (!savedKey || savedKey.length == 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self showKeyPromptWithMessage:@"Vui lòng nhập Key kích hoạt để tiếp tục." prefillKey:nil];
+        });
         return;
     }
 
-    NSURL *url = [NSURL URLWithString:kKeyURL];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.HTTPMethod = @"GET";
-    request.timeoutInterval = 15;
-    [request setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+    // Thêm timestamp và dùng phiên ẩn danh (ephemeral) + Header chống cache tuyệt đối
+    NSString *urlString = [NSString stringWithFormat:@"%@?t=%f", GITHUB_API_URL, [[NSDate date] timeIntervalSince1970]];
+    NSURL *url = [NSURL URLWithString:urlString];
 
-    [[[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data || ![(NSHTTPURLResponse *)response statusCode] ||
-            [(NSHTTPURLResponse *)response statusCode] != 200) {
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData
+                                                       timeoutInterval:15.0];
+    [request setValue:@"no-cache, no-store, must-revalidate" forHTTPHeaderField:@"Cache-Control"];
+    [request setValue:@"no-cache" forHTTPHeaderField:@"Pragma"];
+    [request setValue:@"application/vnd.github.v3.raw" forHTTPHeaderField:@"Accept"];
+
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        if (error || !data) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                completion(NO, @"Không thể kết nối Server. Hãy thử lại.");
+                [self showKeyPromptWithMessage:@"Lỗi kết nối mạng. Không thể kiểm tra Key!" prefillKey:savedKey];
             });
             return;
         }
 
-        NSString *body = [[NSString alloc] initWithData:data
-                                               encoding:NSUTF8StringEncoding];
-        if (!body) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(NO, @"Dữ liệu KEY trên Server không hợp lệ.");
-            });
-            return;
-        }
+        NSDate *currentDate = [self getServerDateFromResponse:response];
+        
+        NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
+        [dateFormatter setDateFormat:@"yyyy-MM-dd HH:mm"];
+        [dateFormatter setTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Ho_Chi_Minh"]];
 
-        BOOL valid = NO;
-        for (NSString *rawLine in [body componentsSeparatedByCharactersInSet:
-                                   NSCharacterSet.newlineCharacterSet]) {
-            NSString *line = [rawLine stringByTrimmingCharactersInSet:
-                              NSCharacterSet.whitespaceAndNewlineCharacterSet];
-            if (![line hasPrefix:@"key:"]) continue;
-            NSString *candidate = [[line substringFromIndex:4]
-                stringByTrimmingCharactersInSet:
-                NSCharacterSet.whitespaceAndNewlineCharacterSet];
-            if (candidate.length && [candidate isEqualToString:trimmed]) {
-                valid = YES;
+        NSString *content = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        NSArray *lines = [content componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+        
+        BOOL isKeyFound = NO;
+        BOOL isExpired = NO;
+        NSString *expiryDisplay = @"Vĩnh viễn";
+        NSDate *validExpiryDate = nil;
+
+        for (NSString *line in lines) {
+            NSString *trimmedLine = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (trimmedLine.length == 0) continue;
+
+            NSArray *parts = [trimmedLine componentsSeparatedByString:@"|"];
+            NSString *serverKey = [parts[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+            if ([serverKey isEqualToString:savedKey]) {
+                isKeyFound = YES;
+                
+                if (parts.count > 1) {
+                    NSString *expiryStr = [parts[1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                    
+                    if (![expiryStr.uppercaseString isEqualToString:@"LIFETIME"]) {
+                        validExpiryDate = [dateFormatter dateFromString:expiryStr];
+                        expiryDisplay = expiryStr;
+                        
+                        if (validExpiryDate && [currentDate compare:validExpiryDate] == NSOrderedDescending) {
+                            isExpired = YES;
+                        }
+                    }
+                }
                 break;
             }
         }
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            completion(valid, valid ? @"Xác thực thành công." : @"KEY không hợp lệ.");
-        });
-    }] resume];
+        if (!isKeyFound) {
+            if (wasVerifiedBefore) {
+                // Nếu trước đó đã dùng key này rồi mà nay bị xóa khỏi GitHub -> Đá văng app
+                [self forceLogoutAndExitWithReason:@"Key của bạn đã bị thu hồi hoặc xóa khỏi hệ thống. Ứng dụng sẽ thoát!"];
+            } else {
+                // Nếu vừa mới nhập key lần đầu mà chưa thấy (sai key hoặc GitHub chưa đồng bộ) -> Giữ nguyên key để bấm thử lại
+                [[NSUserDefaults standardUserDefaults] removeObjectForKey:SAVED_KEY_PREF];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self showKeyPromptWithMessage:@"Key không tồn tại hoặc đang đồng bộ. Vui lòng kiểm tra lại và bấm Xác nhận!" prefillKey:savedKey];
+                });
+            }
+        } else if (isExpired) {
+            // Key hết hạn -> Xóa key & Đá văng app
+            NSString *msg = [NSString stringWithFormat:@"Key đã hết hạn lúc %@. Ứng dụng sẽ thoát để nhập Key mới!", expiryDisplay];
+            [self forceLogoutAndExitWithReason:msg];
+        } else {
+            // Key hợp lệ -> Đánh dấu đã xác thực thành công và bật đếm ngược
+            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:IS_VERIFIED_BEFORE];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+
+            if (validExpiryDate) {
+                [self scheduleAutoKickAtDate:validExpiryDate currentServerDate:currentDate expiryString:expiryDisplay];
+            }
+            
+            BOOL hasShown = [[NSUserDefaults standardUserDefaults] boolForKey:FIRST_LOGIN_ALERT];
+            if (!hasShown) {
+                [[NSUserDefaults standardUserDefaults] setBool:YES forKey:FIRST_LOGIN_ALERT];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+                
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSString *welcomeMsg = [NSString stringWithFormat:@"Key: %@\nHạn dùng: %@", savedKey, expiryDisplay];
+                    [self showInfoAlertWithTitle:@"Kích Hoạt Thành Công" message:welcomeMsg];
+                });
+            }
+        }
+    }];
+    [task resume];
 }
 
-static void GKShowKeyPrompt(void) {
-    // Kiểm tra nếu đã xác thực thành công trước đó thì bỏ qua
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:kSavedKeyDefaultKey]) {
++ (void)showKeyPromptWithMessage:(NSString *)message prefillKey:(NSString *)prefill {
+    UIWindow *window = [self getActiveWindow];
+    UIViewController *rootVC = window.rootViewController;
+    while (rootVC.presentedViewController) {
+        rootVC = rootVC.presentedViewController;
+    }
+    
+    if (!rootVC) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self showKeyPromptWithMessage:message prefillKey:prefill];
+        });
         return;
     }
 
-    if (gPromptVisible || gRequestInProgress) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Đăng Nhập Key"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
 
-    UIViewController *root = GKTopViewController();
-    if (!root || root.isBeingPresented || root.view.window == nil) return;
-
-    gPromptVisible = YES;
-    UIAlertController *alert =
-      [UIAlertController alertControllerWithTitle:@"Teddy Team"
-                                          message:@"Nhập KEY để xác thực"
-                                   preferredStyle:UIAlertControllerStyleAlert];
-
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = @"Nhập KEY...";
-        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        field.autocorrectionType = UITextAutocorrectionTypeNo;
-        field.clearButtonMode = UITextFieldViewModeWhileEditing;
-        field.secureTextEntry = YES;
+    [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
+        textField.placeholder = @"Nhập mã key của bạn...";
+        textField.text = prefill ?: @"";
+        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
     }];
 
-    __weak UIAlertController *weakAlert = alert;
-    [alert addAction:[UIAlertAction actionWithTitle:@"XÁC NHẬN"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
-        NSString *key = weakAlert.textFields.firstObject.text ?: @"";
-        gRequestInProgress = YES;
+    UIAlertAction *pasteAction = [UIAlertAction actionWithTitle:@"Dán & Xác nhận" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        NSString *pastedString = [[UIPasteboard generalPasteboard].string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (pastedString.length > 0) {
+            [[NSUserDefaults standardUserDefaults] setObject:pastedString forKey:SAVED_KEY_PREF];
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:FIRST_LOGIN_ALERT];
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:IS_VERIFIED_BEFORE];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            [self checkLicense];
+        } else {
+            [self showKeyPromptWithMessage:@"Bộ nhớ tạm đang trống, vui lòng copy key trước!" prefillKey:prefill];
+        }
+    }];
 
-        GKValidateKey(key, ^(BOOL valid, NSString *message) {
-            gRequestInProgress = NO;
+    UIAlertAction *confirmAction = [UIAlertAction actionWithTitle:@"Xác nhận" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        NSString *inputKey = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        
+        if (inputKey.length > 0) {
+            [[NSUserDefaults standardUserDefaults] setObject:inputKey forKey:SAVED_KEY_PREF];
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:FIRST_LOGIN_ALERT];
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:IS_VERIFIED_BEFORE];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            [self checkLicense];
+        } else {
+            [self showKeyPromptWithMessage:@"Vui lòng không để trống ô nhập Key!" prefillKey:nil];
+        }
+    }];
 
-            if (valid) {
-                [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kSavedKeyDefaultKey];
-                [[NSUserDefaults standardUserDefaults] synchronize];
-            }
-
-            UIViewController *presenter = GKTopViewController();
-            UIAlertController *result =
-              [UIAlertController alertControllerWithTitle:(valid ? @"KEY HỢP LỆ IB TEDDY LẤY KEY" : @"THÔNG BÁO")
-                                                  message:message
-                                           preferredStyle:UIAlertControllerStyleAlert];
-            [result addAction:[UIAlertAction actionWithTitle:@"OK"
-                                                       style:UIAlertActionStyleDefault
-                                                     handler:^(__unused UIAlertAction *a) {
-                gPromptVisible = NO;
-                if (!valid) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        GKShowKeyPrompt();
-                    });
-                }
-            }]];
-            [presenter presentViewController:result animated:YES completion:nil];
-        });
-    }]];
-
-    [root presentViewController:alert animated:YES completion:nil];
+    [alert addAction:pasteAction];
+    [alert addAction:confirmAction];
+    [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
-%ctor {
-    @autoreleasepool {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if ([[NSUserDefaults standardUserDefaults] boolForKey:kSavedKeyDefaultKey]) {
-                return;
-            }
-
-            [[NSNotificationCenter defaultCenter]
-             addObserverForName:UIApplicationDidBecomeActiveNotification
-                         object:nil
-                          queue:NSOperationQueue.mainQueue
-                     usingBlock:^(__unused NSNotification *note) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                    (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    GKShowKeyPrompt();
-                });
-            }];
-
-            if (UIApplication.sharedApplication.applicationState ==
-                UIApplicationStateActive) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                    (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    GKShowKeyPrompt();
-                });
-            }
-        });
++ (void)showInfoAlertWithTitle:(NSString *)title message:(NSString *)message {
+    UIWindow *window = [self getActiveWindow];
+    UIViewController *rootVC = window.rootViewController;
+    while (rootVC.presentedViewController) {
+        rootVC = rootVC.presentedViewController;
     }
+    if (!rootVC) return;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Bắt đầu sử dụng" style:UIAlertActionStyleCancel handler:nil]];
+    [rootVC presentViewController:alert animated:YES completion:nil];
+}
+
+@end
+
+static void __attribute__((constructor)) initialize(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [KeyManager checkLicense];
+    });
 }
